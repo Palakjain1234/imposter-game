@@ -4,14 +4,13 @@ import cors from "cors";
 import { Server } from "socket.io";
 
 const app = express();
-app.use(cors({ origin: process.env.CLIENT_URL || "*" }));
-const server = http.createServer(app);
-
+const clientUrl = (process.env.CLIENT_URL || "*").replace(/\/$/, "");
+app.use(cors({ origin: clientUrl }));
 const io = new Server(server, {
-  cors: {
-    origin: process.env.CLIENT_URL || "*",
-  },
+  cors: { origin: clientUrl },
 });
+
+const server = http.createServer(app);
 
 // In-memory room store. Fine for MVP — swap for Redis later if you need
 // multiple server instances.
