@@ -10,6 +10,8 @@ export const wordBank = {
     ["Swimming", "Diving"],
     ["Cricket", "Baseball"],
     ["Boxing", "Wrestling"],
+    ["Cycling", "Skateboarding"],
+    ["Golf", "Croquet"],
   ],
   food: [
     ["Pizza", "Burger"],
@@ -18,6 +20,8 @@ export const wordBank = {
     ["Ice Cream", "Frozen Yogurt"],
     ["Pasta", "Noodles"],
     ["Samosa", "Spring Roll"],
+    ["Croissant", "Bagel"],
+    ["Sushi", "Sashimi"],
   ],
   animals: [
     ["Lion", "Tiger"],
@@ -26,12 +30,17 @@ export const wordBank = {
     ["Eagle", "Hawk"],
     ["Horse", "Zebra"],
     ["Rabbit", "Hare"],
+    ["Crocodile", "Alligator"],
+    ["Penguin", "Puffin"],
   ],
   movies_tv: [
     ["Comedy", "Sitcom"],
     ["Thriller", "Horror"],
     ["Documentary", "Biopic"],
     ["Cartoon", "Anime"],
+    ["Sequel", "Remake"],
+    ["Streaming", "Cable"],
+    ["Director", "Producer"],
   ],
   professions: [
     ["Doctor", "Nurse"],
@@ -39,6 +48,39 @@ export const wordBank = {
     ["Pilot", "Astronaut"],
     ["Chef", "Baker"],
     ["Police Officer", "Detective"],
+    ["Architect", "Engineer"],
+    ["Journalist", "Reporter"],
+    ["Lawyer", "Judge"],
+  ],
+  nature: [
+    ["Mountain", "Volcano"],
+    ["River", "Lake"],
+    ["Forest", "Jungle"],
+    ["Desert", "Savanna"],
+    ["Ocean", "Sea"],
+    ["Cave", "Cavern"],
+    ["Waterfall", "Rapids"],
+    ["Glacier", "Iceberg"],
+  ],
+  technology: [
+    ["Laptop", "Tablet"],
+    ["Wi-Fi", "Bluetooth"],
+    ["App", "Software"],
+    ["Robot", "Drone"],
+    ["Password", "PIN"],
+    ["Podcast", "Audiobook"],
+    ["Streaming", "Downloading"],
+    ["Keyboard", "Touchscreen"],
+  ],
+  party: [
+    ["Birthday", "Anniversary"],
+    ["DJ", "Live Band"],
+    ["Karaoke", "Open Mic"],
+    ["Costume", "Uniform"],
+    ["Confetti", "Streamers"],
+    ["Cocktail", "Mocktail"],
+    ["Photo Booth", "Selfie"],
+    ["Dance Floor", "Stage"],
   ],
 };
 
@@ -51,4 +93,12 @@ export function pickRandomPair(topic) {
 
 export function topicList() {
   return Object.keys(wordBank);
+}
+
+// Pick a topic from a list at random, then pick a word pair from it.
+export function pickRandomPairFromTopics(topics) {
+  if (!topics || topics.length === 0) return null;
+  const topic = topics[Math.floor(Math.random() * topics.length)];
+  const pair  = pickRandomPair(topic);
+  return pair ? { ...pair, topic } : null;
 }
