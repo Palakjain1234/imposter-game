@@ -6,14 +6,14 @@ const socket = io(SERVER_URL);
 
 // ─── Category metadata ────────────────────────────────────────────────────────
 const CATEGORY_META = {
-  sports:      { label: "Sports",      color: "#e53935" },
+  sports:      { label: "Sports",       color: "#e53935" },
   food:        { label: "Food & Drinks", color: "#e53935" },
-  animals:     { label: "Animals",     color: "#e53935" },
-  movies_tv:   { label: "Movies",      color: "#e53935" },
-  professions: { label: "Professions", color: "#e53935" },
-  nature:      { label: "Nature",      color: "#e53935" },
-  technology:  { label: "Technology",  color: "#e53935" },
-  party:       { label: "Party",       color: "#e53935" },
+  animals:     { label: "Animals",      color: "#e53935" },
+  movies_tv:   { label: "Movies & TV",  color: "#e53935" },
+  professions: { label: "Professions",  color: "#e53935" },
+  nature:      { label: "Nature",       color: "#e53935" },
+  technology:  { label: "Technology",   color: "#e53935" },
+  space:       { label: "Space",        color: "#e53935" },
 };
 
 const formatLabel = (t) =>
@@ -47,19 +47,18 @@ export default function App() {
   const [timeLeft, setTimeLeft]           = useState(null);
   const [results, setResults]             = useState(null);
   const [hasVoted, setHasVoted]           = useState(false);
-  const [roleRevealed, setRoleRevealed]   = useState(false); // per-player: has tapped "Reveal"
-  const [playerRevealIdx, setPlayerRevealIdx] = useState(0); // which player is being shown
+  const [myVotedId, setMyVotedId]         = useState(null); // which candidate I voted for
+  const [roleRevealed, setRoleRevealed]   = useState(false); // this player has tapped Reveal on their own phone
   const timerRef = useRef(null);
 
   useEffect(() => {
     socket.on("room:update", (updatedRoom) => {
       setRoom(updatedRoom);
-      if (updatedRoom.status !== "voting_phase") setHasVoted(false);
+      if (updatedRoom.status !== "voting_phase") { setHasVoted(false); setMyVotedId(null); }
       if (updatedRoom.status !== "results")      setResults(null);
       // reset reveal state when a new round starts
       if (updatedRoom.status === "word_reveal") {
         setRoleRevealed(false);
-        setPlayerRevealIdx(0);
       }
     });
     socket.on("word:assign", ({ word, isImposter, topic }) => {
@@ -67,12 +66,12 @@ export default function App() {
       setAmIImposter(!!isImposter);
       setMyTopic(topic || null);
     });
-    socket.on("voting:start", () => setHasVoted(false));
+    socket.on("voting:start", () => { setHasVoted(false); setMyVotedId(null); });
     socket.on("results:reveal", (payload) => setResults(payload));
     socket.on("session:reset", () => {
       setResults(null); setMyWord(null); setAmIImposter(false);
-      setMyTopic(null); setHasVoted(false); setError("");
-      setRoleRevealed(false); setPlayerRevealIdx(0);
+      setMyTopic(null); setHasVoted(false); setMyVotedId(null); setError("");
+      setRoleRevealed(false);
     });
     return () => {
       socket.off("room:update"); socket.off("word:assign");
@@ -137,7 +136,7 @@ export default function App() {
   const submitVote = (id) => {
     socket.emit("vote:submit", { votedForPlayerId: id }, (res) => {
       if (!res.ok) return setError(res.error || "Vote failed");
-      setHasVoted(true); setError("");
+      setHasVoted(true); setMyVotedId(id); setError("");
     });
   };
   const playAgain = () => {
@@ -205,13 +204,21 @@ export default function App() {
 
     // ── SETTINGS / LOBBY (host pre-game config) ───────────────────────────
     if (room.status === "lobby") {
+      const mode    = room.categoryMode || "surprise";
       const selCats = room.selectedCategories || allTopics;
+
       const toggleCat = (t) => {
         const next = selCats.includes(t)
           ? selCats.filter((c) => c !== t)
           : [...selCats, t];
         saveCategorySettings({ categoryMode: "random", selectedCategories: next.length ? next : [t] });
       };
+      const setMode = (m) => {
+        if (m === "surprise")  saveCategorySettings({ categoryMode: "surprise" });
+        if (m === "single")    saveCategorySettings({ categoryMode: "single", selectedCategory: room.selectedCategory || allTopics[0] });
+        if (m === "random")    saveCategorySettings({ categoryMode: "random", selectedCategories: selCats });
+      };
+
       return (
         <div style={S.page}>
           <div style={S.settingsHeader}>
@@ -233,26 +240,71 @@ export default function App() {
               </div>
             </div>
 
-            {/* Word categories */}
+            {/* Category mode — 3-way segmented control */}
             <div style={S.section}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={S.sectionLabel}>📂 WORD CATEGORIES</div>
-                <span style={{ fontSize: 12, color: "#555" }}>{selCats.length}/{allTopics.length} selected</span>
+              <div style={S.sectionLabel}>📂 WORD CATEGORIES</div>
+              <div style={SEG.row}>
+                {[
+                  { key: "surprise", label: "🎲 Surprise" },
+                  { key: "random",   label: "✦ Mix" },
+                  { key: "single",   label: "⊙ Single" },
+                ].map((opt) => (
+                  <button
+                    key={opt.key}
+                    style={{ ...SEG.btn, ...(mode === opt.key ? SEG.active : {}) }}
+                    onClick={() => isHost && setMode(opt.key)}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
               </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
-                {allTopics.map((t) => {
-                  const on = selCats.includes(t);
-                  return (
-                    <button key={t}
-                      style={{ ...S.pill, background: on ? "#e53935" : "#1e1e1e", color: on ? "#fff" : "#666", border: on ? "none" : "1px solid #2a2a2a", cursor: isHost ? "pointer" : "default" }}
-                      onClick={() => isHost && toggleCat(t)}
-                    >
-                      {on && "✓ "}{formatLabel(t)}
-                    </button>
-                  );
-                })}
-              </div>
-              <p style={{ color: "#444", fontSize: 11, marginTop: 8 }}>Tap to toggle. At least 1 required.</p>
+
+              {/* Surprise mode description */}
+              {mode === "surprise" && (
+                <p style={SEG.desc}>
+                  The system will pick a random category from all {allTopics.length} available categories each round.
+                </p>
+              )}
+
+              {/* Single mode — tap one category */}
+              {mode === "single" && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                  {allTopics.map((t) => {
+                    const on = room.selectedCategory === t;
+                    return (
+                      <button key={t}
+                        style={{ ...S.pill, background: on ? "#e53935" : "#1e1e1e", color: on ? "#fff" : "#666", border: on ? "none" : "1px solid #2a2a2a", cursor: isHost ? "pointer" : "default" }}
+                        onClick={() => isHost && saveCategorySettings({ categoryMode: "single", selectedCategory: t })}
+                      >
+                        {on && "✓ "}{formatLabel(t)}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Random mode — multi-select */}
+              {mode === "random" && (
+                <>
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6 }}>
+                    <span style={{ fontSize: 11, color: "#555" }}>{selCats.length}/{allTopics.length} selected</span>
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
+                    {allTopics.map((t) => {
+                      const on = selCats.includes(t);
+                      return (
+                        <button key={t}
+                          style={{ ...S.pill, background: on ? "#e53935" : "#1e1e1e", color: on ? "#fff" : "#666", border: on ? "none" : "1px solid #2a2a2a", cursor: isHost ? "pointer" : "default" }}
+                          onClick={() => isHost && toggleCat(t)}
+                        >
+                          {on && "✓ "}{formatLabel(t)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p style={{ color: "#444", fontSize: 11, marginTop: 8 }}>Tap to toggle. At least 1 required.</p>
+                </>
+              )}
             </div>
           </div>
 
@@ -274,76 +326,54 @@ export default function App() {
       );
     }
 
-    // ── WORD REVEAL — pass-device flow ───────────────────────────────────────
+    // ── WORD REVEAL — each player sees their own role on their own phone ────
     if (room.status === "word_reveal") {
-      const orderedPlayers = players; // server order is fine
-      const total          = orderedPlayers.length;
-      const currentP       = orderedPlayers[playerRevealIdx];
-      const isMyTurn       = currentP?.id === myId;
-      const allDone        = playerRevealIdx >= total;
+      // Count how many players have NOT yet revealed (use votedPlayerIds slot reuse
+      // is wrong — we track readiness differently). For the host "Start Discussion"
+      // button we just always show it once roleRevealed is true for the host.
 
-      // After all players have seen their word, host sees "Start Clues" screen
-      if (allDone) {
+      // HIDDEN state — player hasn't tapped Reveal yet
+      if (!roleRevealed) {
         return (
           <div style={S.page}>
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "0 24px" }}>
-              <GhostIcon size={56} color="#e53935" />
-              <h2 style={{ color: "#fff", marginTop: 20, fontSize: 22 }}>Everyone's ready!</h2>
-              <p style={{ color: "#555", marginTop: 8 }}>All players have seen their role.</p>
-            </div>
-            {isHost && (
-              <div style={S.bottomBar}>
-                <button style={S.redPill} onClick={startDescribePhase}>START DISCUSSION</button>
-              </div>
-            )}
-            {!isHost && <div style={S.bottomBar}><p style={{ color: "#555", textAlign: "center" }}>Waiting for host…</p></div>}
-            {error && <p style={S.error}>{error}</p>}
-          </div>
-        );
-      }
-
-      // Pass-device screen (hidden role)
-      if (!roleRevealed || currentP?.id !== myId) {
-        return (
-          <div style={S.page}>
-            <p style={S.stepLabel}>Player {playerRevealIdx + 1} of {total}</p>
             <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16 }}>
               <div style={S.eyeSlashBox}>
                 <span style={{ fontSize: 36 }}>🙈</span>
               </div>
-              <h2 style={{ color: "#fff", fontSize: 22, margin: 0 }}>{currentP?.name ?? "Player"}</h2>
-              <p style={{ color: "#555", fontSize: 14, margin: 0 }}>Pass the device to this player</p>
+              <h2 style={{ color: "#fff", fontSize: 22, margin: 0 }}>Your turn to look</h2>
+              <p style={{ color: "#555", fontSize: 14, margin: 0, textAlign: "center", maxWidth: 260 }}>
+                Make sure no one else can see your screen, then tap to reveal your role
+              </p>
             </div>
             <div style={S.bottomBar}>
-              <button style={S.redPill} onClick={() => { if (isMyTurn) setRoleRevealed(true); else setRoleRevealed(true); }}>
+              <button style={S.redPill} onClick={() => setRoleRevealed(true)}>
                 👁 REVEAL MY ROLE
               </button>
               <p style={{ color: "#444", fontSize: 11, textAlign: "center", marginTop: 8 }}>
-                Make sure only the current player can see the screen
+                Make sure only you can see the screen
               </p>
             </div>
           </div>
         );
       }
 
-      // Role reveal screen (my word / imposter)
+      // REVEALED state — show word or imposter role
       return (
         <div style={S.page}>
-          <p style={S.stepLabel}>Player {playerRevealIdx + 1} of {total}</p>
           <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, padding: "0 24px" }}>
             <div style={S.ghostBox}><GhostIcon size={44} color="#fff" /></div>
-            <div style={{ ...S.roleBadge, background: amIImposter && isMyTurn ? "#e53935" : "#2e7d32" }}>
-              {amIImposter && isMyTurn ? "IMPOSTER" : "CREWMATE"}
+            <div style={{ ...S.roleBadge, background: amIImposter ? "#e53935" : "#2e7d32" }}>
+              {amIImposter ? "IMPOSTER" : "CREWMATE"}
             </div>
             <h2 style={{ color: "#fff", fontSize: 24, margin: "4px 0 0", textAlign: "center" }}>
-              {amIImposter && isMyTurn ? "You are the Imposter!" : `Your word is`}
+              {amIImposter ? "You are the Imposter!" : "Your word is"}
             </h2>
-            {!(amIImposter && isMyTurn) && (
+            {!amIImposter && (
               <div style={S.wordRevealCard}>
                 <span style={S.wordRevealText}>{myWord || "…"}</span>
               </div>
             )}
-            {amIImposter && isMyTurn && (
+            {amIImposter && (
               <p style={{ color: "#aaa", fontSize: 14, textAlign: "center", maxWidth: 280 }}>
                 You don't know the secret word. Blend in and don't get caught!
               </p>
@@ -355,14 +385,19 @@ export default function App() {
               </p>
             </div>
           </div>
-          <div style={S.bottomBar}>
-            <button style={S.nextBtn} onClick={() => { setRoleRevealed(false); setPlayerRevealIdx((i) => i + 1); }}>
-              NEXT &gt;
-            </button>
-            <p style={{ color: "#444", fontSize: 11, textAlign: "center", marginTop: 8 }}>
-              Make sure only the current player can see the screen
-            </p>
-          </div>
+          {/* Host gets the Start Discussion button; everyone else just waits */}
+          {isHost ? (
+            <div style={S.bottomBar}>
+              <button style={S.redPill} onClick={startDescribePhase}>START DISCUSSION</button>
+            </div>
+          ) : (
+            <div style={S.bottomBar}>
+              <p style={{ color: "#555", fontSize: 14, textAlign: "center" }}>
+                Waiting for host to start the discussion…
+              </p>
+            </div>
+          )}
+          {error && <p style={{ ...S.error, padding: "0 20px" }}>{error}</p>}
         </div>
       );
     }
@@ -416,16 +451,21 @@ export default function App() {
       );
     }
 
-    // ── VOTING PHASE ─────────────────────────────────────────────────────────
+    // ── VOTING PHASE — WhatsApp poll style ───────────────────────────────────
     if (room.status === "voting_phase") {
-      const eligible     = room.eligibleCandidates;
-      const candidates   = players.filter((p) => p.id !== myId && (!eligible || eligible.includes(p.id)));
-      const waitingCount = connectedCount(room) - (room.votedPlayerIds?.length ?? 0);
+      const eligible       = room.eligibleCandidates;
+      const allCandidates  = players.filter((p) => !eligible || eligible.includes(p.id));
+      const totalVotes     = room.votedPlayerIds?.length ?? 0;
+      const totalVoters    = connectedCount(room);
+      const waitingCount   = totalVoters - totalVotes;
       const mins = String(Math.floor((timeLeft ?? 0) / 60)).padStart(1, "0");
       const secs = String((timeLeft ?? 0) % 60).padStart(2, "0");
 
+      // myVote: the candidate id this player chose (stored locally after submit)
+
       return (
         <div style={S.page}>
+          {/* Header */}
           <div style={S.settingsHeader}>
             <span style={S.roomCodeBadge}>{room.roomCode}</span>
             <span style={S.settingsTitle}>Vote</span>
@@ -436,31 +476,99 @@ export default function App() {
             <div style={S.warnBanner}>⚠️ Tied! If tied again, imposter wins automatically.</div>
           )}
 
-          <div style={{ flex: 1, overflowY: "auto", padding: "0 20px 100px" }}>
-            <div style={{ textAlign: "center", margin: "16px 0 20px" }}>
-              <div style={S.bigTimer} suppressHydrationWarning>{mins}:{secs}</div>
-              <p style={{ color: "#555", fontSize: 13, marginTop: 6 }}>Attempt {room.votingAttempt} of 2</p>
+          <div style={{ flex: 1, overflowY: "auto", padding: "16px 16px 100px" }}>
+
+            {/* Poll bubble card */}
+            <div style={WA.card}>
+              {/* Poll header */}
+              <div style={WA.pollHeader}>
+                <span style={WA.pollIcon}>📊</span>
+                <div>
+                  <div style={WA.pollTitle}>Who is the Imposter?</div>
+                  <div style={WA.pollSub}>
+                    {eligible ? "Tied round — restricted candidates" : `${totalVotes} of ${totalVoters} voted`}
+                  </div>
+                </div>
+              </div>
+
+              <div style={WA.divider} />
+
+              {/* Timer inside card */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0 4px" }}>
+                <span style={{ color: "#8696a0", fontSize: 12 }}>⏱ Time left</span>
+                <span style={{ color: timeLeft <= 10 ? "#ef5350" : "#fff", fontWeight: 700, fontSize: 14, fontVariantNumeric: "tabular-nums" }}>
+                  {mins}:{secs}
+                </span>
+              </div>
+
+              <div style={WA.divider} />
+
+              {/* Options */}
+              {allCandidates.map((p) => {
+                const isMe         = p.id === myId;
+                const isMineChoice = hasVoted && myVotedId === p.id;
+                // Before results: only your choice shows a filled bar (like WhatsApp pre-close)
+                const pct = hasVoted ? (isMineChoice ? 100 : 0) : 0;
+                const canVote = !hasVoted && !isMe;
+
+                return (
+                  <button
+                    key={p.id}
+                    disabled={!canVote}
+                    onClick={() => canVote && submitVote(p.id)}
+                    style={{
+                      ...WA.option,
+                      cursor: canVote ? "pointer" : "default",
+                      opacity: !hasVoted && isMe ? 0.4 : 1,
+                    }}
+                  >
+                    {/* Fill bar (visible after voting) */}
+                    {hasVoted && (
+                      <div style={{ ...WA.fillBar, width: `${pct}%`, background: isMineChoice ? "#00a884" : "#2a3942" }} />
+                    )}
+
+                    {/* Radio circle / checkmark */}
+                    <div style={{
+                      ...WA.radio,
+                      borderColor: isMineChoice ? "#00a884" : "#8696a0",
+                      background: isMineChoice ? "#00a884" : "transparent",
+                    }}>
+                      {isMineChoice && <span style={{ color: "#fff", fontSize: 11, lineHeight: 1 }}>✓</span>}
+                    </div>
+
+                    {/* Name */}
+                    <span style={{ ...WA.optionName, color: isMineChoice ? "#00a884" : "#e9edef", flex: 1 }}>
+                      {p.name}
+                      {isMe && <span style={{ color: "#8696a0", fontSize: 11 }}> (you)</span>}
+                    </span>
+
+                    {/* Vote count (hidden pre-vote, shows total after) */}
+                    {hasVoted && (
+                      <span style={WA.voteCount}>{pct}%</span>
+                    )}
+                  </button>
+                );
+              })}
+
+              <div style={WA.divider} />
+
+              {/* Footer */}
+              <div style={WA.pollFooter}>
+                {hasVoted ? (
+                  <span style={{ color: "#00a884" }}>
+                    ✓ Voted · waiting for {waitingCount} more…
+                  </span>
+                ) : (
+                  <span style={{ color: "#8696a0" }}>Tap an option to vote</span>
+                )}
+              </div>
+
+              {/* Timestamp */}
+              <div style={{ textAlign: "right", marginTop: 4 }}>
+                <span style={WA.timestamp}>{mins}:{secs} remaining</span>
+              </div>
             </div>
 
-            {hasVoted ? (
-              <div style={{ textAlign: "center", marginTop: 20 }}>
-                <p style={{ color: "#4caf50", fontSize: 16, fontWeight: "bold" }}>✓ Vote submitted</p>
-                <p style={{ color: "#555", fontSize: 14, marginTop: 4 }}>Waiting for {waitingCount} more…</p>
-              </div>
-            ) : (
-              <>
-                <p style={{ color: "#555", fontSize: 13, marginBottom: 12, textAlign: "center" }}>
-                  {eligible ? "Vote restricted to tied players:" : "Who is the imposter?"}
-                </p>
-                {candidates.map((p) => (
-                  <button key={p.id} style={S.voteRow} onClick={() => submitVote(p.id)}>
-                    <div style={S.voteAvatar}><GhostIcon size={20} color="#e53935" /></div>
-                    <span style={{ color: "#eee", flex: 1, textAlign: "left", fontWeight: "600" }}>{p.name}</span>
-                    <span style={{ color: "#333", fontSize: 18 }}>›</span>
-                  </button>
-                ))}
-              </>
-            )}
           </div>
           {error && <p style={{ ...S.error, padding: "0 20px" }}>{error}</p>}
         </div>
@@ -673,5 +781,98 @@ const S = {
   secretWord: {
     color: "#4caf50", fontSize: 28, fontWeight: 900, textAlign: "center",
     margin: "8px 0 2px",
+  },
+};
+
+// ─── WhatsApp Poll styles ─────────────────────────────────────────────────────
+const WA = {
+  // Outer chat bubble — matches WhatsApp dark received-message bubble
+  card: {
+    background: "#1f2c34",
+    borderRadius: 12,
+    padding: "12px 14px 8px",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+    marginBottom: 12,
+  },
+
+  // Poll header row: 📊 icon + title + subtext
+  pollHeader: {
+    display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 10,
+  },
+  pollIcon: { fontSize: 22, lineHeight: 1.2 },
+  pollTitle: {
+    color: "#e9edef", fontSize: 15, fontWeight: 600, lineHeight: 1.3,
+  },
+  pollSub: {
+    color: "#8696a0", fontSize: 12, marginTop: 2,
+  },
+
+  divider: {
+    height: 1, background: "#2a3942", margin: "8px 0",
+  },
+
+  // Each poll option row — position relative for the fill bar
+  option: {
+    position: "relative",
+    display: "flex", alignItems: "center", gap: 10,
+    width: "100%", padding: "10px 10px",
+    background: "transparent", border: "none",
+    borderRadius: 8, marginBottom: 4,
+    textAlign: "left", overflow: "hidden",
+    boxSizing: "border-box",
+  },
+
+  // Animated fill bar (behind content via position absolute)
+  fillBar: {
+    position: "absolute", left: 0, top: 0, bottom: 0,
+    borderRadius: 8,
+    transition: "width 0.4s ease",
+    zIndex: 0,
+  },
+
+  // Radio circle — 20px, outlined, fills green when chosen
+  radio: {
+    width: 20, height: 20, borderRadius: "50%",
+    border: "2px solid #8696a0",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    flexShrink: 0, zIndex: 1,
+    transition: "border-color 0.2s, background 0.2s",
+  },
+
+  optionName: {
+    fontSize: 14, fontWeight: 500, zIndex: 1,
+  },
+
+  voteCount: {
+    color: "#8696a0", fontSize: 12, zIndex: 1, flexShrink: 0,
+  },
+
+  // Footer line below options
+  pollFooter: {
+    color: "#8696a0", fontSize: 12, paddingTop: 2,
+  },
+
+  timestamp: {
+    color: "#8696a0", fontSize: 11,
+  },
+};
+
+// ─── Segmented control styles (3-way category mode toggle) ───────────────────
+const SEG = {
+  row: {
+    display: "flex", gap: 6, marginTop: 10,
+    background: "#1a1a1a", borderRadius: 10, padding: 4,
+  },
+  btn: {
+    flex: 1, padding: "8px 4px", borderRadius: 8, border: "none",
+    background: "transparent", color: "#555", fontSize: 12,
+    fontWeight: 600, cursor: "pointer", letterSpacing: 0.3,
+  },
+  active: {
+    background: "#e53935", color: "#fff",
+  },
+  desc: {
+    color: "#555", fontSize: 12, marginTop: 10, lineHeight: 1.5,
+    textAlign: "center",
   },
 };

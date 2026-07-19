@@ -2,7 +2,7 @@ import express from "express";
 import http from "http";
 import cors from "cors";
 import { Server } from "socket.io";
-import { pickRandomPair, pickRandomPairFromTopics, topicList } from "./wordBank.js";
+import { pickPairNoRepeat, topicList } from "./wordBank.js";
 
 const app = express();
 app.use(cors());
@@ -21,9 +21,13 @@ const VOTE_DURATION_MS = 25_000;
 //   players: [{ id, name, socketId, connected, isImposter, word }],
 //
 //   // category settings (host-controlled, persists across rounds)
-//   categoryMode,         // "single" | "random"
+//   categoryMode,         // "single" | "random" | "surprise"
 //   selectedCategory,     // string  — used when mode === "single"
 //   selectedCategories,   // string[] — used when mode === "random"
+//
+//   // no-repeat tracking: Map<topic, Set<usedIndex>> — persists across Play Again,
+//   // reset only on End Session
+//   usedPairIndexes,
 //
 //   // scoreboard — persists across Play Again, reset only by End Session
 //   groupScore, imposterScore, roundsPlayed,
@@ -83,12 +87,19 @@ function publicRoomState(roomCode) {
 
 // Pick the topic for a new round based on the room's category settings.
 function pickTopicForRoom(room) {
-  if (room.categoryMode === "random" && room.selectedCategories?.length > 0) {
-    return room.selectedCategories[
-      Math.floor(Math.random() * room.selectedCategories.length)
-    ];
+  const all = topicList();
+  if (room.categoryMode === "surprise") {
+    return all[Math.floor(Math.random() * all.length)];
   }
-  return room.selectedCategory || topicList()[0];
+  if (room.categoryMode === "random" && room.selectedCategories?.length > 0) {
+    return room.selectedCategories[Math.floor(Math.random() * room.selectedCategories.length)];
+  }
+  return room.selectedCategory || all[0];
+}
+
+// Pick a pair using no-repeat tracking.
+function pickPairForRoom(topic, room) {
+  return pickPairNoRepeat(topic, room.usedPairIndexes);
 }
 
 // ─── Round state reset (keeps scoreboard + category settings intact) ─────────
@@ -248,10 +259,12 @@ io.on("connection", (socket) => {
       status: "lobby",
       topic: null,
       players: [player],
-      // category settings — default to single mode, first topic selected
-      categoryMode:       "single",
+      // category settings — default to surprise mode (pick from all categories)
+      categoryMode:       "surprise",
       selectedCategory:   topics[0],
-      selectedCategories: [...topics], // all on by default in random mode
+      selectedCategories: [...topics],
+      // no-repeat tracking — persists across Play Again, reset on End Session
+      usedPairIndexes: new Map(),
       // scoreboard
       groupScore:    0,
       imposterScore: 0,
@@ -295,10 +308,11 @@ io.on("connection", (socket) => {
         return callback?.({ ok: false, error: "Select at least one category" });
       room.categoryMode       = "random";
       room.selectedCategories = selectedCategories;
+    } else if (categoryMode === "surprise") {
+      room.categoryMode = "surprise";
     } else {
       return callback?.({ ok: false, error: "Invalid category mode" });
     }
-
     callback?.({ ok: true });
     io.to(roomCode).emit("room:update", publicRoomState(roomCode));
   });
@@ -313,7 +327,7 @@ io.on("connection", (socket) => {
       return callback?.({ ok: false, error: "Need at least 3 players to start" });
 
     const topic = pickTopicForRoom(room);
-    const pair  = pickRandomPair(topic);
+    const pair  = pickPairForRoom(topic, room);
     if (!pair) return callback?.({ ok: false, error: "Could not pick a word pair" });
 
     const imposterIndex = Math.floor(Math.random() * room.players.length);
@@ -397,7 +411,7 @@ io.on("connection", (socket) => {
     if (room.voteTimer) { clearTimeout(room.voteTimer); room.voteTimer = null; }
 
     const topic = pickTopicForRoom(room);
-    const pair  = pickRandomPair(topic);
+    const pair  = pickPairForRoom(topic, room);
     if (!pair) return callback?.({ ok: false, error: "Could not pick word pair" });
 
     const imposterIndex = Math.floor(Math.random() * room.players.length);
@@ -433,6 +447,7 @@ io.on("connection", (socket) => {
     room.groupScore         = 0;
     room.imposterScore      = 0;
     room.roundsPlayed       = 0;
+    room.usedPairIndexes    = new Map(); // reset no-repeat tracking
     room.turnOrder          = null;
     room.turnIndex          = 0;
     room.turnDeadline       = null;
