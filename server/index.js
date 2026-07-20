@@ -2,7 +2,7 @@ import express from "express";
 import http from "http";
 import cors from "cors";
 import { Server } from "socket.io";
-import { pickPairNoRepeat, topicList } from "./wordBank.js";
+import { pickPairNoRepeat, topicList, getHint } from "./wordBank.js";
 
 const app = express();
 app.use(cors());
@@ -12,13 +12,12 @@ const io = new Server(server, {
   cors: { origin: "*" }, // tighten this before you deploy publicly
 });
 
-const TURN_DURATION_MS = 15_000;
 const VOTE_DURATION_MS = 25_000;
 
 // ─── Room shape ───────────────────────────────────────────────────────────────
 // {
 //   hostSocketId, status, topic,
-//   players: [{ id, name, socketId, connected, isImposter, word }],
+//   players: [{ id, name, socketId, connected, isImposter, word, waitingForNextRound }],
 //
 //   // category settings (host-controlled, persists across rounds)
 //   categoryMode,         // "single" | "random" | "surprise"
@@ -32,11 +31,19 @@ const VOTE_DURATION_MS = 25_000;
 //   // scoreboard — persists across Play Again, reset only by End Session
 //   groupScore, imposterScore, roundsPlayed,
 //
-//   // describe_phase
-//   turnOrder, turnIndex, turnTimer, turnDeadline,
+//   // describe_phase (shared discussion timer — no per-player turns)
+//   discussionTimer, discussionDeadline,
 //
 //   // voting_phase
 //   votingAttempt, votes, eligibleCandidates, voteTimer, voteDeadline,
+//
+//   // round words (stored for results reveal)
+//   majorityWord, imposterWord, imposterHint,
+//
+//   // game settings (host-controlled)
+//   discussionDuration,   // ms — default 60000
+//   imposterCount,        // number — default 1 (only 1 is functional)
+//   hintMode,             // "hint" | "none"
 // }
 const rooms = {};
 
@@ -67,19 +74,22 @@ function publicRoomState(roomCode) {
     groupScore:    room.groupScore,
     imposterScore: room.imposterScore,
     roundsPlayed:  room.roundsPlayed,
-    // describe_phase
-    turnOrder:           room.turnOrder || null,
-    currentTurnPlayerId: room.turnOrder ? room.turnOrder[room.turnIndex] : null,
-    turnDeadline:        room.turnDeadline || null,
+    // describe_phase — shared discussion timer (replaces per-player turn fields)
+    discussionDeadline: room.discussionDeadline || null,
     // voting_phase
     votingAttempt:      room.votingAttempt || null,
     voteDeadline:       room.voteDeadline || null,
     eligibleCandidates: room.eligibleCandidates || null,
     votedPlayerIds:     room.votes ? Object.keys(room.votes) : [],
+    // game settings
+    discussionDuration: room.discussionDuration,
+    imposterCount:      room.imposterCount,
+    hintMode:           room.hintMode,
     players: room.players.map((p) => ({
       id: p.id,
       name: p.name,
       connected: p.connected,
+      waitingForNextRound: p.waitingForNextRound || false,
       // NOTE: never include word or isImposter here
     })),
   };
@@ -105,10 +115,8 @@ function pickPairForRoom(topic, room) {
 // ─── Round state reset (keeps scoreboard + category settings intact) ─────────
 function resetRoundState(room) {
   room.status             = "word_reveal";
-  room.turnOrder          = null;
-  room.turnIndex          = 0;
-  room.turnTimer          = null;
-  room.turnDeadline       = null;
+  room.discussionTimer    = null;
+  room.discussionDeadline = null;
   room.votingAttempt      = null;
   room.votes              = null;
   room.eligibleCandidates = null;
@@ -116,32 +124,24 @@ function resetRoundState(room) {
   room.voteDeadline       = null;
 }
 
-// ─── Turn helpers ─────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function connectedPlayers(room) {
-  return room.players.filter((p) => p.connected);
+  return room.players.filter((p) => p.connected && !p.waitingForNextRound);
 }
 
-function advanceTurn(roomCode) {
+// ─── Discussion phase helpers ─────────────────────────────────────────────────
+
+function endDiscussion(roomCode) {
   const room = rooms[roomCode];
   if (!room || room.status !== "describe_phase") return;
 
-  if (room.turnTimer) { clearTimeout(room.turnTimer); room.turnTimer = null; }
+  if (room.discussionTimer) { clearTimeout(room.discussionTimer); room.discussionTimer = null; }
 
-  room.turnIndex += 1;
-
-  if (room.turnIndex >= room.turnOrder.length) {
-    room.status       = "voting_phase";
-    room.turnOrder    = null;
-    room.turnDeadline = null;
-    io.to(roomCode).emit("room:update", publicRoomState(roomCode));
-    startVoting(roomCode, 1, null);
-    return;
-  }
-
-  room.turnDeadline = Date.now() + TURN_DURATION_MS;
-  room.turnTimer    = setTimeout(() => advanceTurn(roomCode), TURN_DURATION_MS);
+  room.status             = "voting_phase";
+  room.discussionDeadline = null;
   io.to(roomCode).emit("room:update", publicRoomState(roomCode));
+  startVoting(roomCode, 1, null);
 }
 
 // ─── Voting helpers ───────────────────────────────────────────────────────────
@@ -208,6 +208,8 @@ function closeVoting(roomCode) {
       winner: "imposter",
       reason: "tied_twice",
       secretWord: imposter?.word ?? null,
+      majorityWord: room.majorityWord ?? null,
+      imposterWord: room.imposterWord ?? null,
       groupScore:    room.groupScore,
       imposterScore: room.imposterScore,
       roundsPlayed:  room.roundsPlayed,
@@ -232,6 +234,8 @@ function closeVoting(roomCode) {
     winner,
     reason: accusedIsImposter ? "correct_accusation" : "wrong_accusation",
     secretWord: imposter?.word ?? null,
+    majorityWord: room.majorityWord ?? null,
+    imposterWord: room.imposterWord ?? null,
     groupScore:    room.groupScore,
     imposterScore: room.imposterScore,
     roundsPlayed:  room.roundsPlayed,
@@ -253,7 +257,7 @@ io.on("connection", (socket) => {
   socket.on("room:create", ({ name }, callback) => {
     const roomCode = generateRoomCode();
     const topics   = topicList();
-    const player   = { id: socket.id, name, socketId: socket.id, connected: true };
+    const player   = { id: socket.id, name, socketId: socket.id, connected: true, waitingForNextRound: false };
     rooms[roomCode] = {
       hostSocketId: socket.id,
       status: "lobby",
@@ -269,11 +273,17 @@ io.on("connection", (socket) => {
       groupScore:    0,
       imposterScore: 0,
       roundsPlayed:  0,
-      // describe
-      turnOrder: null, turnIndex: 0, turnTimer: null, turnDeadline: null,
+      // describe_phase (shared discussion timer)
+      discussionTimer: null, discussionDeadline: null,
       // voting
       votingAttempt: null, votes: null, eligibleCandidates: null,
       voteTimer: null, voteDeadline: null,
+      // round words
+      majorityWord: null, imposterWord: null, imposterHint: null,
+      // game settings
+      discussionDuration: 60_000, // default 60 seconds
+      imposterCount: 1,           // TODO: multi-imposter logic
+      hintMode: "hint",
     };
     socket.join(roomCode);
     socket.data.roomCode = roomCode;
@@ -283,12 +293,67 @@ io.on("connection", (socket) => {
   socket.on("room:join", ({ roomCode, name }, callback) => {
     const room = rooms[roomCode];
     if (!room) return callback({ ok: false, error: "Room not found" });
-    const player = { id: socket.id, name, socketId: socket.id, connected: true };
+
+    const waitingForNextRound = room.status !== "lobby";
+    const player = {
+      id: socket.id,
+      name,
+      socketId: socket.id,
+      connected: true,
+      waitingForNextRound,
+    };
     room.players.push(player);
     socket.join(roomCode);
     socket.data.roomCode = roomCode;
-    callback({ ok: true, roomCode, room: publicRoomState(roomCode) });
+    callback({ ok: true, roomCode, room: publicRoomState(roomCode), waitingForNextRound });
     io.to(roomCode).emit("room:update", publicRoomState(roomCode));
+  });
+
+  // Rejoin after page refresh — restore player's socket association
+  socket.on("player:rejoin", ({ roomCode, playerId, name }, callback) => {
+    const room = rooms[roomCode];
+    if (!room) return callback({ ok: false, error: "Session expired" });
+
+    const player = room.players.find((p) => p.id === playerId);
+    if (!player) return callback({ ok: false, error: "Session expired" });
+
+    // Update socket reference and reconnect
+    player.socketId = socket.id;
+    player.connected = true;
+    socket.join(roomCode);
+    socket.data.roomCode = roomCode;
+
+    io.to(roomCode).emit("room:update", publicRoomState(roomCode));
+    callback({ ok: true, room: publicRoomState(roomCode), topics: topicList() });
+  });
+
+  // Player explicitly leaves the room (Quit button)
+  socket.on("player:leave", (_, callback) => {
+    const roomCode = socket.data.roomCode;
+    const room     = rooms[roomCode];
+    if (!room) return callback?.({ ok: true });
+
+    // Remove the player entirely
+    room.players = room.players.filter((p) => p.socketId !== socket.id);
+    socket.leave(roomCode);
+    socket.data.roomCode = null;
+
+    // If room is empty, clean it up
+    if (room.players.length === 0) {
+      if (room.discussionTimer) clearTimeout(room.discussionTimer);
+      if (room.voteTimer)       clearTimeout(room.voteTimer);
+      delete rooms[roomCode];
+      return callback?.({ ok: true });
+    }
+
+    // If host left, promote next player
+    if (room.hostSocketId === socket.id && room.players.length > 0) {
+      room.hostSocketId = room.players[0].socketId;
+    }
+
+    io.to(roomCode).emit("room:update", publicRoomState(roomCode));
+    if (room.status === "voting_phase") maybeCloseVotingEarly(roomCode);
+    callback?.({ ok: true });
   });
 
   // Host updates category settings (available any time from lobby or results)
@@ -317,6 +382,22 @@ io.on("connection", (socket) => {
     io.to(roomCode).emit("room:update", publicRoomState(roomCode));
   });
 
+  // Host updates game settings (discussion duration, imposter count, hint mode)
+  socket.on("settings:update", ({ discussionDuration, imposterCount, hintMode }, callback) => {
+    const roomCode = socket.data.roomCode;
+    const room     = rooms[roomCode];
+    if (!room) return callback?.({ ok: false, error: "Room not found" });
+    if (room.hostSocketId !== socket.id)
+      return callback?.({ ok: false, error: "Only the host can change settings" });
+
+    if (discussionDuration !== undefined) room.discussionDuration = discussionDuration;
+    if (imposterCount      !== undefined) room.imposterCount      = imposterCount; // TODO: multi-imposter logic
+    if (hintMode           !== undefined) room.hintMode           = hintMode;
+
+    callback?.({ ok: true });
+    io.to(roomCode).emit("room:update", publicRoomState(roomCode));
+  });
+
   socket.on("game:start", (_, callback) => {
     const roomCode = socket.data.roomCode;
     const room     = rooms[roomCode];
@@ -326,13 +407,26 @@ io.on("connection", (socket) => {
     if (room.players.length < 3)
       return callback?.({ ok: false, error: "Need at least 3 players to start" });
 
+    // Clear waitingForNextRound for all players at the start of a fresh round
+    room.players.forEach((p) => { p.waitingForNextRound = false; });
+
     const topic = pickTopicForRoom(room);
     const pair  = pickPairForRoom(topic, room);
     if (!pair) return callback?.({ ok: false, error: "Could not pick a word pair" });
 
-    const imposterIndex = Math.floor(Math.random() * room.players.length);
-    room.players.forEach((p, i) => {
-      p.isImposter = i === imposterIndex;
+    // Store majority/imposter words on the room for results reveal
+    room.majorityWord = pair.majorityWord;
+    room.imposterWord = pair.imposterWord;
+
+    // Get hint for this pair (used only if hintMode === "hint")
+    const hint = getHint(topic, pair.pairIndex);
+    room.imposterHint = hint;
+
+    // Bug 3 fix: only pick imposter from connected players
+    const connected = connectedPlayers(room);
+    const imposterPlayer = connected[Math.floor(Math.random() * connected.length)];
+    room.players.forEach((p) => {
+      p.isImposter = p.id === imposterPlayer.id;
       p.word       = p.isImposter ? pair.imposterWord : pair.majorityWord;
     });
     room.status = "word_reveal";
@@ -341,7 +435,13 @@ io.on("connection", (socket) => {
     callback?.({ ok: true });
     io.to(roomCode).emit("room:update", publicRoomState(roomCode));
     room.players.forEach((p) => {
-      io.to(p.socketId).emit("word:assign", { word: p.word, isImposter: p.isImposter, topic });
+      const sendHint = (p.isImposter && room.hintMode === "hint") ? hint : null;
+      io.to(p.socketId).emit("word:assign", {
+        word: p.word,
+        isImposter: p.isImposter,
+        topic,
+        hint: sendHint,
+      });
     });
   });
 
@@ -354,28 +454,26 @@ io.on("connection", (socket) => {
     if (room.status !== "word_reveal")
       return callback?.({ ok: false, error: "Game is not in word reveal phase" });
 
-    const connected   = connectedPlayers(room);
-    room.turnOrder    = connected.map((p) => p.id).sort(() => Math.random() - 0.5);
-    room.turnIndex    = 0;
-    room.status       = "describe_phase";
-    room.turnDeadline = Date.now() + TURN_DURATION_MS;
+    room.status             = "describe_phase";
+    room.discussionDeadline = Date.now() + room.discussionDuration;
 
     callback?.({ ok: true });
     io.to(roomCode).emit("room:update", publicRoomState(roomCode));
-    room.turnTimer = setTimeout(() => advanceTurn(roomCode), TURN_DURATION_MS);
+    room.discussionTimer = setTimeout(() => endDiscussion(roomCode), room.discussionDuration);
   });
 
-  socket.on("turn:advance", (_, callback) => {
+  // Host-only: end discussion early and move to voting
+  socket.on("discussion:end", (_, callback) => {
     const roomCode = socket.data.roomCode;
     const room     = rooms[roomCode];
     if (!room) return callback?.({ ok: false, error: "Room not found" });
+    if (room.hostSocketId !== socket.id)
+      return callback?.({ ok: false, error: "Only the host can end discussion early" });
     if (room.status !== "describe_phase")
-      return callback?.({ ok: false, error: "Not in describe phase" });
-    if (socket.id !== room.turnOrder[room.turnIndex])
-      return callback?.({ ok: false, error: "It's not your turn" });
+      return callback?.({ ok: false, error: "Not in discussion phase" });
 
     callback?.({ ok: true });
-    advanceTurn(roomCode);
+    endDiscussion(roomCode);
   });
 
   socket.on("vote:submit", ({ votedForPlayerId }, callback) => {
@@ -407,16 +505,29 @@ io.on("connection", (socket) => {
     if (room.hostSocketId !== socket.id)
       return callback?.({ ok: false, error: "Only the host can restart" });
 
-    if (room.turnTimer) { clearTimeout(room.turnTimer); room.turnTimer = null; }
-    if (room.voteTimer) { clearTimeout(room.voteTimer); room.voteTimer = null; }
+    if (room.discussionTimer) { clearTimeout(room.discussionTimer); room.discussionTimer = null; }
+    if (room.voteTimer)       { clearTimeout(room.voteTimer);       room.voteTimer = null; }
+
+    // Clear waitingForNextRound for all players when a new round begins
+    room.players.forEach((p) => { p.waitingForNextRound = false; });
 
     const topic = pickTopicForRoom(room);
     const pair  = pickPairForRoom(topic, room);
     if (!pair) return callback?.({ ok: false, error: "Could not pick word pair" });
 
-    const imposterIndex = Math.floor(Math.random() * room.players.length);
-    room.players.forEach((p, i) => {
-      p.isImposter = i === imposterIndex;
+    // Store majority/imposter words on the room for results reveal
+    room.majorityWord = pair.majorityWord;
+    room.imposterWord = pair.imposterWord;
+
+    // Get hint for this pair
+    const hint = getHint(topic, pair.pairIndex);
+    room.imposterHint = hint;
+
+    // Bug 3 fix: only pick imposter from connected players
+    const connected = connectedPlayers(room);
+    const imposterPlayer = connected[Math.floor(Math.random() * connected.length)];
+    room.players.forEach((p) => {
+      p.isImposter = p.id === imposterPlayer.id;
       p.word       = p.isImposter ? pair.imposterWord : pair.majorityWord;
     });
 
@@ -426,7 +537,13 @@ io.on("connection", (socket) => {
     callback?.({ ok: true });
     io.to(roomCode).emit("room:update", publicRoomState(roomCode));
     room.players.forEach((p) => {
-      io.to(p.socketId).emit("word:assign", { word: p.word, isImposter: p.isImposter, topic });
+      const sendHint = (p.isImposter && room.hintMode === "hint") ? hint : null;
+      io.to(p.socketId).emit("word:assign", {
+        word: p.word,
+        isImposter: p.isImposter,
+        topic,
+        hint: sendHint,
+      });
     });
   });
 
@@ -438,23 +555,24 @@ io.on("connection", (socket) => {
     if (room.hostSocketId !== socket.id)
       return callback?.({ ok: false, error: "Only the host can end the session" });
 
-    if (room.turnTimer) { clearTimeout(room.turnTimer); room.turnTimer = null; }
-    if (room.voteTimer) { clearTimeout(room.voteTimer); room.voteTimer = null; }
+    if (room.discussionTimer) { clearTimeout(room.discussionTimer); room.discussionTimer = null; }
+    if (room.voteTimer)       { clearTimeout(room.voteTimer);       room.voteTimer = null; }
 
-    room.players.forEach((p) => { p.isImposter = false; p.word = null; });
+    room.players.forEach((p) => { p.isImposter = false; p.word = null; p.waitingForNextRound = false; });
     room.status             = "lobby";
     room.topic              = null;
     room.groupScore         = 0;
     room.imposterScore      = 0;
     room.roundsPlayed       = 0;
     room.usedPairIndexes    = new Map(); // reset no-repeat tracking
-    room.turnOrder          = null;
-    room.turnIndex          = 0;
-    room.turnDeadline       = null;
+    room.discussionDeadline = null;
     room.votingAttempt      = null;
     room.votes              = null;
     room.eligibleCandidates = null;
     room.voteDeadline       = null;
+    room.majorityWord       = null;
+    room.imposterWord       = null;
+    room.imposterHint       = null;
     // category settings survive — host keeps their preferences
 
     callback?.({ ok: true });
@@ -477,8 +595,8 @@ io.on("connection", (socket) => {
     setTimeout(() => {
       const stillExists = rooms[roomCode];
       if (stillExists && stillExists.players.every((p) => !p.connected)) {
-        if (stillExists.turnTimer) clearTimeout(stillExists.turnTimer);
-        if (stillExists.voteTimer) clearTimeout(stillExists.voteTimer);
+        if (stillExists.discussionTimer) clearTimeout(stillExists.discussionTimer);
+        if (stillExists.voteTimer)       clearTimeout(stillExists.voteTimer);
         delete rooms[roomCode];
       }
     }, 60_000);
